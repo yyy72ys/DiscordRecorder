@@ -1,0 +1,9 @@
+soundfile
+librosa
+numpy
+scipy
+# 任意: 高精度VAD
+# torch
+# torchaudio
+# 任意: 話者埋め込み検証
+# pyannote.audio

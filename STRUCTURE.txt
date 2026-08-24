@@ -1,0 +1,35 @@
+DiscordRecorder — explore内まとめ (更新: 2026-08-24 ビルド対応)
+============================================================
+場所: D:\yohey2026\opencode\explore\DiscordRecorder\  (ZIP同梱: DiscordRecorder.zip)
+
+■ ビルド可能なAndroidプロジェクト構成（新規追加）
+  settings.gradle.kts                  # プロジェクト設定
+  build.gradle.kts                     # ルートビルド
+  gradle.properties                    # Gradle設定
+  gradle/wrapper/gradle-wrapper.properties
+  gradlew / gradlew.bat                # ラッパー
+  .github/workflows/build.yml          # GitHub Actionsで自動ビルド
+  app/build.gradle.kts                 # アプリモジュール (minSdk 29, target 34)
+  app/src/main/AndroidManifest.xml     # 権限修正済み
+  app/src/main/java/com/example/discordrecorder/AudioCaptureService.kt
+  app/src/main/java/com/example/discordrecorder/MainActivity.kt
+
+■ 使い方ドキュメント
+  README.md                            # 詳細 使い方・機能
+  GUIDE_for_kids.md                    # 小学生でもわかる使い方 (ASCII名)
+  小学生でもわかる使い方.md              # 同内容・日本語名
+  README_simple.md                     # 同内容・簡易版
+  BUILD.md                             # APKビルド方法 3パターン解説
+  STRUCTURE.txt                        # このファイル
+
+■ PCスクリプト
+  scripts/separate_speakers.py         # 二系統分離・微小音声増幅
+  scripts/requirements.txt             # pip依存
+  scripts/run.bat                      # 実行例
+
+■ ビルド方法: BUILD.md 参照
+  - Android Studio: Open → Build APK
+  - コマンド: ./gradlew assembleDebug (JDK17 + SDK必要)
+  - GitHub Actions: pushするだけでクラウドでAPK生成（SDK不要・推奨）
+
+出力: app/build/outputs/apk/debug/app-debug.apk

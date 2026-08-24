@@ -1,0 +1,13 @@
+.gradle/
+build/
+app/build/
+.gradle/
+local.properties
+*.iml
+.idea/
+*.apk
+!app/build/outputs/apk/debug/app-debug.apk
+__pycache__/
+*.pyc
+venv/
+output/
