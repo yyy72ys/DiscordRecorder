@@ -1,0 +1,1 @@
+python separate_speakers.py --input rec_20260115_203000.opus --reference my_voice.wav --output output_相手のみ.wav --device cpu --min-length 0.5 --threshold 0.75
