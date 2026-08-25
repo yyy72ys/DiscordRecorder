@@ -16,7 +16,13 @@ import java.net.URL
 
 object UpdateManager {
     private const val REPO = "yyy72ys/DiscordRecorder"
-    private const val CURRENT_VERSION_CODE = 1 // BuildConfig.VERSION_CODE と同期
+
+    private fun getCurrentVersionCode(context: Context): Int {
+        return try {
+            val pi = context.packageManager.getPackageInfo(context.packageName, 0)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) pi.longVersionCode.toInt() else pi.versionCode
+        } catch (_: Exception){ 1 }
+    }
 
     data class ReleaseInfo(
         val tag: String,
@@ -42,7 +48,8 @@ object UpdateManager {
             val tag = json.optString("tag_name", "")
             // versionCodeはタグから抽出 e.g. v2 -> 2, または body内の versionCode
             val versionCode = extractVersionCode(tag, json.optString("body",""))
-            if (versionCode <= CURRENT_VERSION_CODE) return@withContext null
+            val current = getCurrentVersionCode(context)
+            if (versionCode <= current) return@withContext null
             val assets = json.optJSONArray("assets")
             var apkUrl: String? = null
             if (assets != null){

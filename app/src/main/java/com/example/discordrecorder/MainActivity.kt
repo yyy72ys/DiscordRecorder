@@ -80,8 +80,15 @@ class MainActivity : ComponentActivity() {
         var saveMode by remember { mutableStateOf(SettingsManager.getSaveMode(this)) }
         var token by remember { mutableStateOf(SettingsManager.getGithubToken(this) ?: "") }
         var updateStatus by remember { mutableStateOf("") }
+        var autoUpdateInfo by remember { mutableStateOf<UpdateManager.ReleaseInfo?>(null) }
         val scope = rememberCoroutineScope()
         val scroll = rememberScrollState()
+
+        // 自動で更新をチェック（起動時に1回）
+        LaunchedEffect(Unit) {
+            val info = UpdateManager.checkForUpdate(this@MainActivity)
+            if (info != null) autoUpdateInfo = info
+        }
 
         Scaffold { pad ->
             Column(
@@ -93,6 +100,32 @@ class MainActivity : ComponentActivity() {
                     "playback.wav(相手) + mic.wav(自分のささやき) を同時保存。\n後でPCで微小音声を増幅しつつ自分をマスク除去できます。",
                     style = MaterialTheme.typography.bodySmall
                 )
+
+                // 自動更新バナー
+                autoUpdateInfo?.let { info ->
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("🆕 新バージョンあり: ${info.tag}", style = MaterialTheme.typography.titleSmall)
+                            Text(info.body.take(120), style = MaterialTheme.typography.bodySmall)
+                            Button(onClick = {
+                                // インストール権限チェック
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                                    val intent = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                                        data = Uri.parse("package:$packageName")
+                                    }
+                                    startActivity(intent)
+                                    Toast.makeText(this@MainActivity, "「この提供元を許可」をONにしてから再度押してください", Toast.LENGTH_LONG).show()
+                                } else {
+                                    UpdateManager.downloadAndInstall(this@MainActivity, info.apkUrl)
+                                    Toast.makeText(this@MainActivity, "ダウンロード開始", Toast.LENGTH_SHORT).show()
+                                }
+                            }, modifier = Modifier.fillMaxWidth()) {
+                                Text("ワンタップで更新")
+                            }
+                            TextButton(onClick = { autoUpdateInfo = null }) { Text("閉じる") }
+                        }
+                    }
+                }
 
                 Button(
                     onClick = { if (isRecording) stopRecording() else checkAndStart() },
