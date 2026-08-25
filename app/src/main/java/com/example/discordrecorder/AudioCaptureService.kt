@@ -68,11 +68,18 @@ class AudioCaptureService : Service() {
 
         startForeground(NOTIF_ID, createNotification("録音中... タップで停止"))
 
-        // 別フォルダ: Music/DiscordRecorder/<sessionId>/
+        // 別フォルダ: 設定に基づく保存先
         val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
         val sessionId = sdf.format(Date())
-        val base = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-        sessionDir = File(base, "DiscordRecorder/$sessionId").apply { mkdirs() }
+        sessionDir = SettingsManager.getSessionDir(this, sessionId)
+        // 念のため mkdirs 成否をログ
+        if (sessionDir?.exists() == false) {
+            val ok = sessionDir?.mkdirs() ?: false
+            if (!ok) {
+                // フォールバック失敗時は filesDir に
+                sessionDir = File(filesDir, "DiscordRecorder/$sessionId").apply { mkdirs() }
+            }
+        }
         startTimeMs = System.currentTimeMillis()
 
         isRecording.set(true)
@@ -90,12 +97,17 @@ class AudioCaptureService : Service() {
         val micFile = File(dir, "mic.wav")
         val metaFile = File(dir, "meta.json")
 
-        val bufferSizePlayback = AudioRecord.getMinBufferSize(
+        var bufferSizePlayback = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        ) * 2
-        val bufferSizeMic = AudioRecord.getMinBufferSize(
+        )
+        if (bufferSizePlayback <= 0) bufferSizePlayback = 8192
+        else bufferSizePlayback *= 2
+
+        var bufferSizeMic = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        ) * 2
+        )
+        if (bufferSizeMic <= 0) bufferSizeMic = 8192
+        else bufferSizeMic *= 2
 
         // AudioPlaybackCaptureConfiguration: USAGE_MEDIA + USAGE_VOICE_COMMUNICATION + USAGE_GAME
         // Discordは VOICE_COMMUNICATION なので両方指定が重要
@@ -116,6 +128,13 @@ class AudioCaptureService : Service() {
             .setBufferSizeInBytes(bufferSizePlayback)
             .setAudioPlaybackCaptureConfig(playbackConfig)
             .build()
+        // 初期化チェック: 失敗時は即停止ではなく通知で知らせる
+        if (playbackRecord?.state != AudioRecord.STATE_INITIALIZED) {
+            updateNotification("エラー: システム音声の初期化失敗")
+            // 5秒後に停止
+            thread { Thread.sleep(5000); stopRecording() }
+            return
+        }
 
         val micFormat = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -125,14 +144,34 @@ class AudioCaptureService : Service() {
 
         // MIC側は処理を無効化して生データを保持（後でささやき判定しやすくするため）
         // VOICE_COMMUNICATIONはAEC/NSが入るので MIC を使う
-        micRecord = AudioRecord.Builder()
-            .setAudioSource(MediaRecorder.AudioSource.MIC)
-            .setAudioFormat(micFormat)
-            .setBufferSizeInBytes(bufferSizeMic)
-            .build()
+        // RECORD_AUDIO権限がない場合はmic録音をスキップ（クラッシュ防止）
+        val hasMicPermission = try {
+            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } catch (_: Exception){ false }
 
-        val playbackWriter = WavWriter(playbackFile, SAMPLE_RATE, 1)
-        val micWriter = WavWriter(micFile, SAMPLE_RATE, 1)
+        micRecord = if (hasMicPermission) {
+            try {
+                AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.MIC)
+                    .setAudioFormat(micFormat)
+                    .setBufferSizeInBytes(bufferSizeMic)
+                    .build().also {
+                        if (it.state != AudioRecord.STATE_INITIALIZED) {
+                            it.release()
+                            // mic失敗は致命的ではないのでnullで続行
+                        }
+                    }.takeIf { it.state == AudioRecord.STATE_INITIALIZED }
+            } catch (_: Exception){ null }
+        } else null
+
+        val playbackWriter = try { WavWriter(playbackFile, SAMPLE_RATE, 1) } catch (e: Exception){
+            updateNotification("エラー: ファイル作成失敗 ${e.message}")
+            thread { Thread.sleep(4000); stopRecording() }
+            return
+        }
+        val micWriter: WavWriter? = if (micRecord != null) {
+            try { WavWriter(micFile, SAMPLE_RATE, 1) } catch (_: Exception){ null }
+        } else null
 
         // 同期用メタ情報
         val meta = JSONObject().apply {
@@ -151,36 +190,49 @@ class AudioCaptureService : Service() {
         thread(name = "playback-capture") {
             try {
                 playbackRecord?.startRecording()
+                // 録音開始成功を通知更新
+                updateNotification("録音中... ${sessionDir?.absolutePath}")
                 val buf = ByteArray(bufferSizePlayback)
                 while (isRecording.get()) {
                     val n = playbackRecord?.read(buf, 0, buf.size) ?: -1
                     if (n > 0) playbackWriter.write(buf, 0, n)
+                    else if (n < 0) {
+                        // 読み込みエラー時は少し待つ
+                        Thread.sleep(10)
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+                updateNotification("録音エラー: ${e.message}")
             } finally {
                 try { playbackRecord?.stop() } catch (_: Exception) {}
-                playbackWriter.close()
+                try { playbackWriter.close() } catch (_: Exception) {}
             }
         }
 
         thread(name = "mic-capture") {
+            if (micRecord == null || micWriter == null) {
+                // micなしでもmetaだけ更新
+                return@thread
+            }
             try {
                 micRecord?.startRecording()
                 val buf = ByteArray(bufferSizeMic)
                 while (isRecording.get()) {
                     val n = micRecord?.read(buf, 0, buf.size) ?: -1
                     if (n > 0) micWriter.write(buf, 0, n)
+                    else if (n < 0) Thread.sleep(10)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
                 try { micRecord?.stop() } catch (_: Exception) {}
-                micWriter.close()
+                try { micWriter.close() } catch (_: Exception) {}
                 // 録音終了後にmetaを更新
                 try {
                     meta.put("endTimeMs", System.currentTimeMillis())
                     meta.put("durationMs", System.currentTimeMillis() - startTimeMs)
+                    meta.put("micAvailable", micRecord != null)
                     metaFile.writeText(meta.toString(2))
                 } catch (_: Exception) {}
             }
@@ -209,6 +261,13 @@ class AudioCaptureService : Service() {
             }
             (getSystemService(NotificationManager::class.java))?.createNotificationChannel(ch)
         }
+    }
+
+    private fun updateNotification(text: String){
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(NOTIF_ID, createNotification(text))
+        } catch (_: Exception){}
     }
 
     private fun createNotification(content: String): Notification {

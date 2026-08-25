@@ -11,3 +11,6 @@ __pycache__/
 *.pyc
 venv/
 output/
+
+DiscordRecorder.zip
+*.zip
