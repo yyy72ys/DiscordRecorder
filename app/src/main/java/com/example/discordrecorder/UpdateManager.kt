@@ -42,14 +42,35 @@ object UpdateManager {
                 connectTimeout = 8000
                 readTimeout = 8000
             }
-            if (conn.responseCode != 200) return@withContext null
+            val code = conn.responseCode
+            Logger.i("checkForUpdate: HTTP $code")
+            if (code != 200) {
+                val err = try { conn.errorStream?.bufferedReader()?.readText()?.take(300) } catch (_: Exception){ "" }
+                Logger.w("checkForUpdate: non-200 $code err=$err")
+                return@withContext null
+            }
             val text = conn.inputStream.bufferedReader().readText()
             val json = JSONObject(text)
             val tag = json.optString("tag_name", "")
             // versionCodeはタグから抽出 e.g. v2 -> 2, または body内の versionCode
             val versionCode = extractVersionCode(tag, json.optString("body",""))
             val current = getCurrentVersionCode(context)
-            if (versionCode <= current) return@withContext null
+            val currentName = try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" } catch (_: Exception){ "" }
+            Logger.i("checkForUpdate: tag=$tag versionCode=$versionCode current=$current currentName=$currentName")
+            // タグが同じなら更新なし（versionName比較を優先）
+            if (tag.isNotBlank() && tag == "v$currentName") {
+                Logger.i("checkForUpdate: tag equals current versionName, no update")
+                return@withContext null
+            }
+            if (versionCode <= current) {
+                // versionCodeが取れない場合はタグ比較で判定
+                if (versionCode == 0 && tag.isNotBlank() && tag != "v$currentName") {
+                    // タグが違うなら更新ありとみなす
+                } else {
+                    Logger.i("checkForUpdate: no update (versionCode $versionCode <= $current)")
+                    return@withContext null
+                }
+            }
             val assets = json.optJSONArray("assets")
             var apkUrl: String? = null
             if (assets != null){
