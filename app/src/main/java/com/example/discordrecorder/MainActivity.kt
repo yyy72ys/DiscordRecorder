@@ -67,6 +67,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Logger.init(this)
+        Logger.i("MainActivity onCreate")
         setContent {
             MaterialTheme {
                 MainScreen()
@@ -210,8 +212,105 @@ class MainActivity : ComponentActivity() {
 
                 // 認証付きアップデートの説明
                 Text("トークンを設定するとプライベートリポジトリのリリースも取得できます。公開リポジトリなら不要です。", style = MaterialTheme.typography.bodySmall)
+
+                Divider()
+                // デバッグ・診断（録音が始まらない時の観測用）
+                var diagnosticText by remember { mutableStateOf("") }
+                var logText by remember { mutableStateOf("") }
+                var showLogs by remember { mutableStateOf(false) }
+                Text("デバッグ・診断", style = MaterialTheme.typography.titleMedium)
+                Text("録音が始まらない・保存できない時はここで原因を確認できます", style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = {
+                        diagnosticText = Logger.buildDiagnostics(this@MainActivity)
+                        Logger.i("diagnostics executed")
+                    }) { Text("診断を実行") }
+                    OutlinedButton(onClick = {
+                        logText = Logger.readAll(this@MainActivity)
+                        showLogs = !showLogs
+                    }) { Text(if(showLogs) "ログを隠す" else "ログを表示") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = {
+                        val f = Logger.fileForShare(this@MainActivity)
+                        if (f != null) {
+                            val uri = androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", f)
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            startActivity(Intent.createChooser(intent, "ログを共有"))
+                        } else {
+                            Toast.makeText(this@MainActivity, "ログファイルなし", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("ログを共有") }
+                    OutlinedButton(onClick = {
+                        Logger.clear(this@MainActivity)
+                        logText = ""
+                        diagnosticText = ""
+                        Toast.makeText(this@MainActivity, "ログをクリアしました", Toast.LENGTH_SHORT).show()
+                    }) { Text("ログをクリア") }
+                }
+                if (diagnosticText.isNotBlank()) {
+                    Text("診断結果:", style = MaterialTheme.typography.titleSmall)
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Text(diagnosticText, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(8.dp))
+                    }
+                    OutlinedButton(onClick = {
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, diagnosticText)
+                        }
+                        startActivity(Intent.createChooser(intent, "診断結果を共有"))
+                    }, modifier = Modifier.fillMaxWidth()) { Text("診断結果を共有") }
+                }
+                if (showLogs && logText.isNotBlank()) {
+                    Text("ログ:", style = MaterialTheme.typography.titleSmall)
+                    Card(modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)) {
+                        Text(logText, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(8.dp).verticalScroll(rememberScrollState()))
+                    }
+                }
+                // クイックテスト: 保存先に1秒の無音WAVが作れるか
+                OutlinedButton(onClick = {
+                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        try {
+                            val sdf = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                            val sid = "test_${sdf.format(java.util.Date())}"
+                            val dir = SettingsManager.getSessionDir(this@MainActivity, sid)
+                            val testFile = java.io.File(dir, "test.wav")
+                            // 1秒無音
+                            val dataSize = 48000 * 2 // 1sec mono 16bit
+                            val raf = java.io.RandomAccessFile(testFile, "rw")
+                            raf.setLength(0)
+                            raf.writeBytes("RIFF"); writeIntLE(raf, 36 + dataSize); raf.writeBytes("WAVE")
+                            raf.writeBytes("fmt "); writeIntLE(raf, 16); writeShortLE(raf, 1); writeShortLE(raf, 1)
+                            writeIntLE(raf, 48000); writeIntLE(raf, 48000*2); writeShortLE(raf, 2); writeShortLE(raf, 16)
+                            raf.writeBytes("data"); writeIntLE(raf, dataSize)
+                            raf.write(ByteArray(dataSize))
+                            raf.close()
+                            launch(kotlinx.coroutines.Dispatchers.Main) {
+                                Toast.makeText(this@MainActivity, "テスト成功: ${testFile.absolutePath} (${testFile.length()}B)", Toast.LENGTH_LONG).show()
+                                diagnosticText = "テスト書き込み成功: ${testFile.absolutePath}\nexists=${testFile.exists()} size=${testFile.length()}\nこのファイルができていれば保存先は正常です"
+                            }
+                            Logger.i("test write success ${testFile.absolutePath}")
+                        } catch (e: Exception) {
+                            launch(kotlinx.coroutines.Dispatchers.Main) {
+                                Toast.makeText(this@MainActivity, "テスト失敗: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
+                            Logger.e("test write fail", e)
+                        }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) { Text("保存テスト（1秒無音を作成）") }
             }
         }
+    }
+
+    private fun writeIntLE(raf: java.io.RandomAccessFile, v: Int) {
+        raf.write(v and 0xFF); raf.write((v shr 8) and 0xFF); raf.write((v shr 16) and 0xFF); raf.write((v shr 24) and 0xFF)
+    }
+    private fun writeShortLE(raf: java.io.RandomAccessFile, v: Int) {
+        raf.write(v and 0xFF); raf.write((v shr 8) and 0xFF)
     }
 
     private fun checkAndStart() {

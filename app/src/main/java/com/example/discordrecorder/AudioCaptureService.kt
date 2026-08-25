@@ -47,26 +47,58 @@ class AudioCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Logger.init(this)
         createNotificationChannel()
+        Logger.i("Service onCreate")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Logger.i("onStartCommand action=${intent?.action} resultCode=${intent?.getIntExtra(EXTRA_RESULT_CODE, -999)} hasData=${intent?.hasExtra(EXTRA_RESULT_DATA)}")
         if (intent?.action == ACTION_STOP) {
+            Logger.i("ACTION_STOP received")
             stopRecording()
             return START_NOT_STICKY
         }
 
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
-        val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
-        if (resultCode == -1 || resultData == null) {
+        if (intent == null) {
+            Logger.w("onStartCommand: intent null (system restart), stopping")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mgr.getMediaProjection(resultCode, resultData)
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1)
+        val resultData = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+        if (resultCode == -1 || resultData == null) {
+            Logger.e("Invalid projection resultCode=$resultCode hasData=${resultData != null}")
+            updateNotification("エラー: 投影データ無効")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        try {
+            val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = mgr.getMediaProjection(resultCode, resultData)
+            if (mediaProjection == null) {
+                Logger.e("getMediaProjection returned null")
+                updateNotification("エラー: MediaProjection取得失敗")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            // コールバックで停止を検知
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Logger.w("MediaProjection onStop callback")
+                    stopRecording()
+                }
+            }, null)
+        } catch (e: Exception) {
+            Logger.e("getMediaProjection exception", e)
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         startForeground(NOTIF_ID, createNotification("録音中... タップで停止"))
+        Logger.i("startForeground done")
 
         // 別フォルダ: 設定に基づく保存先
         val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
@@ -89,33 +121,50 @@ class AudioCaptureService : Service() {
     }
 
     private fun startDualRecording() {
-        val dir = sessionDir ?: return
+        val dir = sessionDir ?: run {
+            Logger.e("startDualRecording: sessionDir is null")
+            updateNotification("エラー: 保存先が無効")
+            return
+        }
+        Logger.i("startDualRecording dir=${dir.absolutePath} exists=${dir.exists()} canWrite=${dir.canWrite()} mode=${SettingsManager.getSaveMode(this)}")
 
         // Playback (相手側 = システム音声) 用
         val playbackFile = File(dir, "playback.wav")
         // Mic (自分側 = ささやき含む) 用
         val micFile = File(dir, "mic.wav")
         val metaFile = File(dir, "meta.json")
+        Logger.i("files: playback=${playbackFile.absolutePath} mic=${micFile.absolutePath}")
 
         var bufferSizePlayback = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
+        Logger.i("getMinBufferSize playback raw=$bufferSizePlayback")
         if (bufferSizePlayback <= 0) bufferSizePlayback = 8192
         else bufferSizePlayback *= 2
+        Logger.i("bufferSizePlayback final=$bufferSizePlayback")
 
         var bufferSizeMic = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
+        Logger.i("getMinBufferSize mic raw=$bufferSizeMic")
         if (bufferSizeMic <= 0) bufferSizeMic = 8192
         else bufferSizeMic *= 2
+        Logger.i("bufferSizeMic final=$bufferSizeMic")
 
         // AudioPlaybackCaptureConfiguration: USAGE_MEDIA + USAGE_VOICE_COMMUNICATION + USAGE_GAME
         // Discordは VOICE_COMMUNICATION なので両方指定が重要
-        val playbackConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
-            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-            .addMatchingUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-            .addMatchingUsage(AudioAttributes.USAGE_GAME)
-            .build()
+        val playbackConfig = try {
+            AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .build().also { Logger.i("playbackConfig created") }
+        } catch (e: Exception) {
+            Logger.e("playbackConfig build failed", e)
+            updateNotification("エラー: キャプチャ設定失敗: ${e.message}")
+            thread { Thread.sleep(5000); stopRecording() }
+            return
+        }
 
         val playbackFormat = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -123,18 +172,30 @@ class AudioCaptureService : Service() {
             .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
             .build()
 
-        playbackRecord = AudioRecord.Builder()
-            .setAudioFormat(playbackFormat)
-            .setBufferSizeInBytes(bufferSizePlayback)
-            .setAudioPlaybackCaptureConfig(playbackConfig)
-            .build()
+        playbackRecord = try {
+            AudioRecord.Builder()
+                .setAudioFormat(playbackFormat)
+                .setBufferSizeInBytes(bufferSizePlayback)
+                .setAudioPlaybackCaptureConfig(playbackConfig)
+                .build().also { Logger.i("playbackRecord built state=${it.state}") }
+        } catch (e: Exception) {
+            Logger.e("playbackRecord build exception", e)
+            updateNotification("エラー: 録音初期化例外 ${e.message}")
+            thread { Thread.sleep(5000); stopRecording() }
+            return
+        }
         // 初期化チェック: 失敗時は即停止ではなく通知で知らせる
         if (playbackRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            updateNotification("エラー: システム音声の初期化失敗")
+            Logger.e("playbackRecord STATE not INITIALIZED: ${playbackRecord?.state}")
+            updateNotification("エラー: システム音声の初期化失敗 (state=${playbackRecord?.state})")
+            // 空ファイル削除
+            try { playbackFile.delete() } catch (_: Exception) {}
+            try { micFile.delete() } catch (_: Exception) {}
             // 5秒後に停止
             thread { Thread.sleep(5000); stopRecording() }
             return
         }
+        Logger.i("playbackRecord initialized OK")
 
         val micFormat = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
