@@ -40,6 +40,17 @@ object SettingsManager {
 
     fun setCustomUri(context: Context, uri: Uri?) {
         prefs(context).edit().putString(KEY_CUSTOM_URI, uri?.toString()).apply()
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun isCustomUriValid(context: Context): Boolean {
+        val uri = getCustomUri(context) ?: return false
+        val perms = context.contentResolver.persistedUriPermissions
+        return perms.any { it.uri == uri && it.isWritePermission }
     }
 
     fun getGithubToken(context: Context): String? =
@@ -47,6 +58,13 @@ object SettingsManager {
 
     fun setGithubToken(context: Context, token: String?) {
         prefs(context).edit().putString(KEY_GITHUB_TOKEN, token).apply()
+    }
+
+    private const val KEY_AUTO_SEND = "auto_send"
+    fun isAutoSendEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_AUTO_SEND, false)
+    fun setAutoSendEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AUTO_SEND, enabled).apply()
     }
 
     /** 保存先のセッションディレクトリを返す。mkdirs失敗時は internal にフォールバック */

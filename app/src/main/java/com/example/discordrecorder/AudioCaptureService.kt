@@ -14,10 +14,12 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
@@ -53,10 +55,18 @@ class AudioCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Logger.i("onStartCommand action=${intent?.action} resultCode=${intent?.getIntExtra(EXTRA_RESULT_CODE, -999)} hasData=${intent?.hasExtra(EXTRA_RESULT_DATA)}")
+        Logger.i("onStartCommand action=${intent?.action} resultCode=${intent?.getIntExtra(EXTRA_RESULT_CODE, -999)} hasData=${intent?.hasExtra(EXTRA_RESULT_DATA)} save=${intent?.getBooleanExtra("save", false)}")
         if (intent?.action == ACTION_STOP) {
-            Logger.i("ACTION_STOP received")
-            stopRecording()
+            val isSave = intent.getBooleanExtra("save", false)
+            Logger.i("ACTION_STOP received save=$isSave")
+            if (isSave) {
+                // 保存して停止: 通知で保存先を表示
+                sessionDir?.let { updateNotification("保存しました: ${it.absolutePath}") }
+                // 少し待ってから停止（ユーザーが通知を見られるように）
+                thread { Thread.sleep(800); stopRecording() }
+            } else {
+                stopRecording()
+            }
             return START_NOT_STICKY
         }
 
@@ -334,15 +344,23 @@ class AudioCaptureService : Service() {
     private fun createNotification(content: String): Notification {
         val stopIntent = Intent(this, AudioCaptureService::class.java).apply { action = ACTION_STOP }
         val stopPi = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        // 保存して停止は同じだが、ユーザーに「保存される」ことが分かるように別ラベル
+        val saveIntent = Intent(this, AudioCaptureService::class.java).apply { action = ACTION_STOP; putExtra("save", true) }
+        val savePi = PendingIntent.getService(this, 1, saveIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val openIntent = Intent(this, MainActivity::class.java)
-        val openPi = PendingIntent.getActivity(this, 1, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val openPi = PendingIntent.getActivity(this, 2, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("DiscordRecorder")
+            .setContentTitle("DiscordRecorder 録音中")
             .setContentText(content)
             .setSmallIcon(android.R.drawable.presence_audio_online)
             .setOngoing(true)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(openPi)
             .addAction(android.R.drawable.ic_media_pause, "停止", stopPi)
+            .addAction(android.R.drawable.ic_menu_save, "保存して停止", savePi)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .build()
     }
 

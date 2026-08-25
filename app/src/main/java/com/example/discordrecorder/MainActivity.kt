@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private var isRecording by mutableStateOf(false)
+    private var saveModeState by mutableStateOf(SettingsManager.SaveMode.INTERNAL)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -58,10 +59,18 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
         if (uri != null) {
-            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            } catch (e: Exception) {
+                Logger.w("takePersistableUriPermission failed: ${e.message}")
+            }
             SettingsManager.setCustomUri(this, uri)
             SettingsManager.setSaveMode(this, SettingsManager.SaveMode.CUSTOM)
+            saveModeState = SettingsManager.SaveMode.CUSTOM
+            Logger.i("Custom folder selected: $uri")
             Toast.makeText(this, "保存先を設定しました", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "キャンセルされました", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -79,17 +88,25 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun MainScreen() {
-        var saveMode by remember { mutableStateOf(SettingsManager.getSaveMode(this)) }
-        var token by remember { mutableStateOf(SettingsManager.getGithubToken(this) ?: "") }
+        // saveModeはActivityのStateを使うことで、フォルダ選択後もUIが更新される
+        var token by remember { mutableStateOf(SettingsManager.getGithubToken(this@MainActivity) ?: "") }
         var updateStatus by remember { mutableStateOf("") }
         var autoUpdateInfo by remember { mutableStateOf<UpdateManager.ReleaseInfo?>(null) }
         val scope = rememberCoroutineScope()
         val scroll = rememberScrollState()
 
-        // 自動で更新をチェック（起動時に1回）
+        // 起動時にサービスが動いているか確認して isRecording と saveMode を復元
         LaunchedEffect(Unit) {
-            val info = UpdateManager.checkForUpdate(this@MainActivity)
-            if (info != null) autoUpdateInfo = info
+            saveModeState = SettingsManager.getSaveMode(this@MainActivity)
+            isRecording = isServiceRunning()
+            Logger.i("MainScreen launch: saveMode=$saveModeState isRecording=$isRecording")
+            // 自動で更新をチェック（起動時に1回）
+            try {
+                val info = UpdateManager.checkForUpdate(this@MainActivity)
+                if (info != null) autoUpdateInfo = info
+            } catch (e: Exception) {
+                Logger.w("auto update check failed: ${e.message}")
+            }
         }
 
         Scaffold { pad ->
@@ -146,18 +163,19 @@ class MainActivity : ComponentActivity() {
                 // 保存先設定
                 Text("保存先の設定", style = MaterialTheme.typography.titleMedium)
                 Text("現在: ${SettingsManager.getDisplayPath(this@MainActivity)}", style = MaterialTheme.typography.bodySmall)
+                Text("状態: ${if(SettingsManager.isCustomUriValid(this@MainActivity)) "カスタム有効" else if(saveModeState==SettingsManager.SaveMode.CUSTOM) "カスタム無効→内部にフォールバック" else "OK"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    FilterChip(selected = saveMode == SettingsManager.SaveMode.INTERNAL, onClick = {
-                        saveMode = SettingsManager.SaveMode.INTERNAL
-                        SettingsManager.setSaveMode(this@MainActivity, saveMode)
+                    FilterChip(selected = saveModeState == SettingsManager.SaveMode.INTERNAL, onClick = {
+                        saveModeState = SettingsManager.SaveMode.INTERNAL
+                        SettingsManager.setSaveMode(this@MainActivity, saveModeState)
+                        Logger.i("saveMode set to INTERNAL")
                     }, label = { Text("内部") })
-                    FilterChip(selected = saveMode == SettingsManager.SaveMode.MUSIC, onClick = {
-                        saveMode = SettingsManager.SaveMode.MUSIC
-                        SettingsManager.setSaveMode(this@MainActivity, saveMode)
+                    FilterChip(selected = saveModeState == SettingsManager.SaveMode.MUSIC, onClick = {
+                        saveModeState = SettingsManager.SaveMode.MUSIC
+                        SettingsManager.setSaveMode(this@MainActivity, saveModeState)
+                        Logger.i("saveMode set to MUSIC")
                     }, label = { Text("Music") })
-                    FilterChip(selected = saveMode == SettingsManager.SaveMode.CUSTOM, onClick = {
-                        saveMode = SettingsManager.SaveMode.CUSTOM
-                        SettingsManager.setSaveMode(this@MainActivity, saveMode)
+                    FilterChip(selected = saveModeState == SettingsManager.SaveMode.CUSTOM, onClick = {
                         folderPickerLauncher.launch(null)
                     }, label = { Text("選択") })
                 }
@@ -281,11 +299,53 @@ class MainActivity : ComponentActivity() {
                         Text(diagnosticText, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(8.dp))
                     }
                     OutlinedButton(onClick = {
-                        val intent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, diagnosticText)
+                        // 自動でGitHubに送る（テスターの動き）
+                        val token = SettingsManager.getGithubToken(this@MainActivity)
+                        if (token.isNullOrBlank()) {
+                            Toast.makeText(this@MainActivity, "先にGitHub Tokenを設定してください", Toast.LENGTH_LONG).show()
+                            return@OutlinedButton
                         }
-                        startActivity(Intent.createChooser(intent, "診断結果を共有"))
+                        scope.launch {
+                            try {
+                                Toast.makeText(this@MainActivity, "GitHubに送信中...", Toast.LENGTH_SHORT).show()
+                                val logs = Logger.readAll(this@MainActivity)
+                                val url = DiagnosticsReporter.sendAsIssue(this@MainActivity, diagnosticText, logs)
+                                if (url != null) {
+                                    Toast.makeText(this@MainActivity, "送信成功", Toast.LENGTH_LONG).show()
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                    startActivity(intent)
+                                } else {
+                                    Toast.makeText(this@MainActivity, "送信失敗: ログを確認", Toast.LENGTH_LONG).show()
+                                }
+                            } catch (e: Exception) {
+                                Logger.e("auto send failed", e)
+                                Toast.makeText(this@MainActivity, "送信失敗: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }, modifier = Modifier.fillMaxWidth()) { Text("GitHubに自動送信（テスター用）") }
+                    OutlinedButton(onClick = {
+                        try {
+                            // 大きなテキストはファイル経由で共有（TransactionTooLarge対策）
+                            val shareFile = java.io.File(cacheDir, "diagnostics.txt").apply { writeText(diagnosticText) }
+                            val uri = androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", shareFile)
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            startActivity(Intent.createChooser(intent, "診断結果を共有"))
+                        } catch (e: Exception) {
+                            Logger.e("share diagnostics failed", e)
+                            Toast.makeText(this@MainActivity, "共有失敗: ${e.message}", Toast.LENGTH_SHORT).show()
+                            // フォールバック: 小さくして再試行
+                            try {
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, diagnosticText.take(8000))
+                                }
+                                startActivity(Intent.createChooser(intent, "診断結果を共有"))
+                            } catch (_: Exception) {}
+                        }
                     }, modifier = Modifier.fillMaxWidth()) { Text("診断結果を共有") }
                 }
                 if (showLogs && logText.isNotBlank()) {
@@ -374,6 +434,17 @@ class MainActivity : ComponentActivity() {
                 }
                 // 単にトーストで案内するだけ
             } catch (_: Exception){}
+        }
+    }
+
+    private fun isServiceRunning(): Boolean {
+        return try {
+            val manager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            @Suppress("DEPRECATION")
+            manager.getRunningServices(Integer.MAX_VALUE).any { it.service.className == AudioCaptureService::class.java.name }
+        } catch (e: Exception) {
+            Logger.w("isServiceRunning check failed: ${e.message}")
+            false
         }
     }
 }
