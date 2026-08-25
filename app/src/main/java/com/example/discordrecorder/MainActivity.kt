@@ -187,28 +187,51 @@ class MainActivity : ComponentActivity() {
                     }) { Text("保存") }
                     OutlinedButton(onClick = {
                         scope.launch {
-                            updateStatus = "確認中..."
-                            val info = UpdateManager.checkForUpdate(this@MainActivity)
-                            updateStatus = if (info != null) {
-                                "新バージョンあり: ${info.tag}\n${info.body.take(120)}"
-                            } else "最新版です"
+                            try {
+                                updateStatus = "確認中..."
+                                Logger.i("manual update check started")
+                                val info = UpdateManager.checkForUpdate(this@MainActivity)
+                                updateStatus = if (info != null) {
+                                    "新バージョンあり: ${info.tag}\n${info.body.take(120)}"
+                                } else "最新版です (v${UpdateManager.getInstalledVersion(this@MainActivity)})"
+                                Logger.i("manual check result: $updateStatus")
+                                Toast.makeText(this@MainActivity, updateStatus, Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                updateStatus = "確認失敗: ${e.message}"
+                                Logger.e("manual check failed", e)
+                                Toast.makeText(this@MainActivity, updateStatus, Toast.LENGTH_LONG).show()
+                            }
                         }
                     }) { Text("更新を確認") }
                 }
                 if (updateStatus.isNotBlank()) {
-                    Text(updateStatus, style = MaterialTheme.typography.bodySmall)
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Text(updateStatus, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(8.dp))
+                    }
                     if (updateStatus.startsWith("新バージョン")) {
                         Button(onClick = {
                             scope.launch {
-                                val info = UpdateManager.checkForUpdate(this@MainActivity)
-                                if (info != null) {
-                                    UpdateManager.downloadAndInstall(this@MainActivity, info.apkUrl)
-                                    Toast.makeText(this@MainActivity, "ダウンロード開始", Toast.LENGTH_SHORT).show()
+                                try {
+                                    val info = UpdateManager.checkForUpdate(this@MainActivity)
+                                    if (info != null) {
+                                        UpdateManager.downloadAndInstall(this@MainActivity, info.apkUrl)
+                                        Toast.makeText(this@MainActivity, "ダウンロード開始: ${info.tag}", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(this@MainActivity, "情報取得失敗", Toast.LENGTH_SHORT).show()
+                                    }
+                                } catch (e: Exception) {
+                                    Logger.e("download failed", e)
+                                    Toast.makeText(this@MainActivity, "失敗: ${e.message}", Toast.LENGTH_LONG).show()
                                 }
                             }
                         }, modifier = Modifier.fillMaxWidth()) { Text("ダウンロードして更新") }
                     }
                 }
+                // ブラウザで直接開く（アプリ内更新が動かない時の保険）
+                OutlinedButton(onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/yyy72ys/DiscordRecorder/releases/latest"))
+                    startActivity(intent)
+                }, modifier = Modifier.fillMaxWidth()) { Text("ブラウザでリリースを開く") }
 
                 // 認証付きアップデートの説明
                 Text("トークンを設定するとプライベートリポジトリのリリースも取得できます。公開リポジトリなら不要です。", style = MaterialTheme.typography.bodySmall)
