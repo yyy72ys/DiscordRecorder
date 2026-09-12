@@ -270,23 +270,30 @@ class MainActivity : ComponentActivity() {
                     }
                     if (updateStatus.startsWith("新バージョン")) {
                         Button(onClick = {
-                            scope.launch {
-                                try {
-                                    val info = autoUpdateInfo ?: UpdateManager.checkForUpdate(this@MainActivity)
-                                    if (info != null) {
-                                        autoUpdateInfo = null
-                                        val ok = UpdateManager.downloadAndInstall(this@MainActivity, info)
-                                        Toast.makeText(
-                                            this@MainActivity,
-                                            if (ok) "インストーラを起動しました: ${info.tag}" else "ダウンロード失敗",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                    } else {
-                                        Toast.makeText(this@MainActivity, "情報取得失敗", Toast.LENGTH_SHORT).show()
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                                startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                                    data = Uri.parse("package:$packageName")
+                                })
+                                Toast.makeText(this@MainActivity, "「この提供元を許可」をONにしてから、もう一度押してください", Toast.LENGTH_LONG).show()
+                            } else {
+                                scope.launch {
+                                    try {
+                                        val info = autoUpdateInfo ?: UpdateManager.checkForUpdate(this@MainActivity)
+                                        if (info != null) {
+                                            autoUpdateInfo = null
+                                            val ok = UpdateManager.downloadAndInstall(this@MainActivity, info)
+                                            Toast.makeText(
+                                                this@MainActivity,
+                                                if (ok) "インストーラを起動しました: ${info.tag}" else "ダウンロード失敗",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else {
+                                            Toast.makeText(this@MainActivity, "情報取得失敗", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } catch (e: Exception) {
+                                        Logger.e("download failed", e)
+                                        Toast.makeText(this@MainActivity, "失敗: ${e.message}", Toast.LENGTH_LONG).show()
                                     }
-                                } catch (e: Exception) {
-                                    Logger.e("download failed", e)
-                                    Toast.makeText(this@MainActivity, "失敗: ${e.message}", Toast.LENGTH_LONG).show()
                                 }
                             }
                         }, modifier = Modifier.fillMaxWidth()) { Text("ダウンロードして更新") }
