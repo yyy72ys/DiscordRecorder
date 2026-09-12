@@ -28,20 +28,30 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
-      - name: Build debug APK
-        run: gradle assembleDebug
+      - name: Decode signing keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          ls -l "$RUNNER_TEMP/release.keystore"
+
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease
 
       - name: Stage APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/DiscordRecorder-v${{ steps.ver.outputs.version }}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/DiscordRecorder-v${{ steps.ver.outputs.version }}.apk"
           zip -j "dist/DiscordRecorder-v${{ steps.ver.outputs.version }}.zip" "dist/DiscordRecorder-v${{ steps.ver.outputs.version }}.apk"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: app-release
+          path: app/build/outputs/apk/release/app-release.apk
 
       - name: Create or update Release
         uses: softprops/action-gh-release@v2
