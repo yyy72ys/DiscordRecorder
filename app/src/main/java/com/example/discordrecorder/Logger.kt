@@ -18,7 +18,11 @@ import kotlin.concurrent.withLock
 object Logger {
     private const val TAG = "DiscordRecorder"
     private val lock = ReentrantLock()
-    private val sdf = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+    // SimpleDateFormatはスレッド非安全なのでThreadLocalで保持
+    private val sdf = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+    }
+    private fun now(): String = sdf.get()!!.format(Date())
     private var logFile: File? = null
 
     fun init(context: Context) {
@@ -26,7 +30,7 @@ object Logger {
             val dir = File(context.filesDir, "logs").apply { mkdirs() }
             logFile = File(dir, "app.log")
             // 起動マーカー
-            i("=== App started ${sdf.format(Date())} ===")
+            i("=== App started ${now()} ===")
             // 未捕捉例外もログ
             val prev = Thread.getDefaultUncaughtExceptionHandler()
             Thread.setDefaultUncaughtExceptionHandler { t, e ->
@@ -42,7 +46,7 @@ object Logger {
     fun e(msg: String, tr: Throwable? = null) = log("E", msg, tr)
 
     private fun log(level: String, msg: String, tr: Throwable?) {
-        val line = "${sdf.format(Date())} $level/$TAG: $msg${tr?.let { " | ${it.javaClass.simpleName}: ${it.message}\n${Log.getStackTraceString(it)}" } ?: ""}"
+        val line = "${now()} $level/$TAG: $msg${tr?.let { " | ${it.javaClass.simpleName}: ${it.message}\n${Log.getStackTraceString(it)}" } ?: ""}"
         when (level) {
             "E" -> Log.e(TAG, msg, tr)
             "W" -> Log.w(TAG, msg, tr)
@@ -88,7 +92,7 @@ object Logger {
     /** 診断情報を組み立てる */
     fun buildDiagnostics(context: Context): String {
         val sb = StringBuilder()
-        sb.appendLine("=== Diagnostics ${sdf.format(Date())} ===")
+        sb.appendLine("=== Diagnostics ${now()} ===")
         sb.appendLine("package: ${context.packageName} ver=${UpdateManager.getInstalledVersion(context)}")
         sb.appendLine("saveMode=${SettingsManager.getSaveMode(context)} path=${SettingsManager.getDisplayPath(context)}")
         val dir = try { SettingsManager.getSessionDir(context, "diagnostic_probe") } catch (e: Exception) { null }

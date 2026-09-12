@@ -13,8 +13,8 @@ AndroidでDiscord通話を録音し、**相手の声だけ**を残してPCで解
 |---|---|
 | **二系統同時録音** | `playback.wav`(相手側システム音声) + `mic.wav`(自分側マイク)を同時・同期録音。イヤホン装着時でも分離可能 |
 | **ささやき除外** | micトラックの発話区間をマスクとしてplaybackから除去。話者埋め込みより高精度 |
-| **微小音声増幅** | WAV無圧縮保存 → PC側で `enhance_faint()` により最大+20dB持ち上げ。後から閾値変えて再実行可能 |
-| **別フォルダ保存** | Android: `Music/DiscordRecorder/<yyyyMMdd_HHmmss>/` / PC: `~/DiscordRecorderWork/output/<sessionId>/` に自動分離 |
+| **微小音声増幅** | WAV無圧縮保存 → PC側で `enhance_faint()` により最大+20dB持ち上げ。**出力(相手のみ)にもゲインを適用**。後から閾値変えて再実行可能 |
+| **保存先を選択可** | 内部(アプリ専用領域) or 選択(SAF)。選択時は録音後に選んだフォルダへコピー。PC側は `~/DiscordRecorderWork/output/<sessionId>/` に自動分離 |
 | **小声VAD** | RMS閾値 `-50dB` / Silero VAD `0.32` でささやきも検出。`--mic-thresh-db` `--play-thresh-db` で調整 |
 | **再処理可能** | エフェクトは全てデータに対する後処理。録り直し不要で何度でもパラメータを変えて試せる |
 | **デバッグ出力** | `other_only.wav` / `mic_only.wav` / `segments.json` を同時出力。タイムライン確認可 |
@@ -51,10 +51,10 @@ PC: scripts/separate_speakers.py
    - `通知` (POST_NOTIFICATIONS, Android 13+) — 録音中通知
    - `画面の録画/投影` (MediaProjection) — システム音声取得。必ず `許可` をタップ
 3. Discord通話に参加（イヤホン推奨）。通知に `● 録音中...` が出る
-4. 終了時: アプリの `停止` ボタン または 通知の `停止` をタップ
-5. ファイルアプリ → `Music/DiscordRecorder/<時刻>/` に3ファイルできていることを確認
+4. 終了時: アプリの `停止` ボタン または 通知の `停止`/`保存して停止` をタップ
+5. 保存完了通知が出る。内部保存なら `Music/DiscordRecorder/<時刻>/`(＝`Android/data/com.example.discordrecorder/files/Music/...`)、選択(SAF)なら指定フォルダに `playback.wav` / `mic.wav` / `meta.json` が入る
 
-> 補足: 初回は `Music/DiscordRecorder/` が自動作成される。録音は `PCM 48kHz Mono 16bit WAV` 無圧縮なので後処理で音質劣化なし。
+> 補足: 録音は `PCM 48kHz Mono 16bit WAV` 無圧縮なので後処理で音質劣化なし。共有の `Music/` フォルダへ直接書く方式は Android 10+ で使えないため、必要な場合は「選択(SAF)」で任意フォルダを指定してください。
 
 ### 3-2. PCへコピー
 
@@ -122,7 +122,7 @@ python scripts/separate_speakers.py --playback ... --mic ... --output out_silero
 
 ## 5. 別フォルダ仕様
 
-- **Android**: `Music/DiscordRecorder/<sessionId>/` ごとに `playback.wav` / `mic.wav` / `meta.json` (開始時刻・サンプルレート・同期用)
+- **Android**: `Music/DiscordRecorder/<sessionId>/`（内部＝アプリ専用領域。選択(SAF)時はここから指定フォルダへコピー）に `playback.wav` / `mic.wav` / `meta.json` (開始時刻・サンプルレート・同期用)
 - **PC**: `~/DiscordRecorderWork/output/<sessionId>/` に出力。`--output` 未指定時は自動で `<sessionId>` 名で作成
 - **メリット**: セッション混同防止、PC側で `output/` を丸ごとバックアップ/削除しやすい、手動転送（Option A）との相性◎
 

@@ -37,6 +37,8 @@ class AudioCaptureService : Service() {
     private val isRecording = AtomicBoolean(false)
     private var sessionDir: File? = null
     private var startTimeMs: Long = 0
+    private var playbackThread: Thread? = null
+    private var micThread: Thread? = null
 
     companion object {
         const val EXTRA_RESULT_CODE = "resultCode"
@@ -44,6 +46,7 @@ class AudioCaptureService : Service() {
         const val ACTION_STOP = "com.example.discordrecorder.STOP"
         private const val CHANNEL_ID = "discord_recorder_channel"
         private const val NOTIF_ID = 1
+        private const val SAVED_NOTIF_ID = 2
         const val SAMPLE_RATE = 48000
     }
 
@@ -57,16 +60,8 @@ class AudioCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Logger.i("onStartCommand action=${intent?.action} resultCode=${intent?.getIntExtra(EXTRA_RESULT_CODE, -999)} hasData=${intent?.hasExtra(EXTRA_RESULT_DATA)} save=${intent?.getBooleanExtra("save", false)}")
         if (intent?.action == ACTION_STOP) {
-            val isSave = intent.getBooleanExtra("save", false)
-            Logger.i("ACTION_STOP received save=$isSave")
-            if (isSave) {
-                // 保存して停止: 通知で保存先を表示
-                sessionDir?.let { updateNotification("保存しました: ${it.absolutePath}") }
-                // 少し待ってから停止（ユーザーが通知を見られるように）
-                thread { Thread.sleep(800); stopRecording() }
-            } else {
-                stopRecording()
-            }
+            Logger.i("ACTION_STOP received save=${intent.getBooleanExtra("save", false)}")
+            stopRecording()
             return START_NOT_STICKY
         }
 
@@ -258,7 +253,7 @@ class AudioCaptureService : Service() {
         metaFile.writeText(meta.toString(2))
 
         // それぞれ別スレッドで録音（タイムスタンプはSystem.nanoTimeで同期可能）
-        thread(name = "playback-capture") {
+        playbackThread = thread(name = "playback-capture") {
             try {
                 playbackRecord?.startRecording()
                 // 録音開始成功を通知更新
@@ -281,7 +276,7 @@ class AudioCaptureService : Service() {
             }
         }
 
-        thread(name = "mic-capture") {
+        micThread = thread(name = "mic-capture") {
             if (micRecord == null || micWriter == null) {
                 // micなしでもmetaだけ更新
                 return@thread
@@ -312,16 +307,93 @@ class AudioCaptureService : Service() {
 
     private fun stopRecording() {
         if (!isRecording.getAndSet(false)) return
+        Logger.i("stopRecording requested")
         try { playbackRecord?.stop() } catch (_: Exception) {}
         try { micRecord?.stop() } catch (_: Exception) {}
-        playbackRecord?.release()
-        micRecord?.release()
-        playbackRecord = null
-        micRecord = null
-        mediaProjection?.stop()
-        mediaProjection = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        // スレッド終了・ファイルclose・選択フォルダへのコピーは別スレッドで行う
+        thread(name = "finalize") {
+            try { playbackThread?.join(4000) } catch (_: Exception) {}
+            try { micThread?.join(4000) } catch (_: Exception) {}
+            try { playbackRecord?.release() } catch (_: Exception) {}
+            try { micRecord?.release() } catch (_: Exception) {}
+            playbackRecord = null
+            micRecord = null
+            try { mediaProjection?.stop() } catch (_: Exception) {}
+            mediaProjection = null
+            val savedText = finalizeSave()
+            postSavedNotification(savedText)
+            try { Thread.sleep(400) } catch (_: Exception) {}
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    /** 保存完了処理。選択(SAF)ならセッションを選択フォルダへコピーし、表示用メッセージを返す。 */
+    private fun finalizeSave(): String {
+        val dir = sessionDir ?: return "保存先なし"
+        return try {
+            if (SettingsManager.getSaveMode(this) == SettingsManager.SaveMode.CUSTOM) {
+                val ok = copySessionToSaf(dir)
+                if (ok) "保存完了（選択フォルダ）: ${dir.name}" else "保存完了（内部）: ${dir.absolutePath}"
+            } else {
+                "保存完了: ${dir.absolutePath}"
+            }
+        } catch (e: Exception) {
+            Logger.e("finalizeSave failed", e)
+            "保存完了: ${dir.absolutePath}"
+        }
+    }
+
+    private fun copySessionToSaf(src: File): Boolean {
+        val treeUri = SettingsManager.getCustomUri(this) ?: return false
+        if (!SettingsManager.isCustomUriValid(this)) {
+            Logger.w("copySessionToSaf: 選択フォルダの権限が無効")
+            return false
+        }
+        val root = DocumentFile.fromTreeUri(this, treeUri) ?: return false
+        val target = root.findFile(src.name) ?: root.createDirectory(src.name) ?: return false
+        val files = listOf(
+            "playback.wav" to "audio/wav",
+            "mic.wav" to "audio/wav",
+            "meta.json" to "application/json"
+        )
+        var copied = 0
+        for ((name, mime) in files) {
+            val f = File(src, name)
+            if (!f.exists()) continue
+            try {
+                target.findFile(name)?.delete()
+                val df = target.createFile(mime, name) ?: continue
+                contentResolver.openOutputStream(df.uri, "w")?.use { out ->
+                    f.inputStream().use { input -> input.copyTo(out) }
+                }
+                copied++
+            } catch (e: Exception) {
+                Logger.e("copySessionToSaf $name failed", e)
+            }
+        }
+        Logger.i("copySessionToSaf copied=$copied -> $treeUri")
+        return copied > 0
+    }
+
+    private fun postSavedNotification(text: String) {
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            val openPi = PendingIntent.getActivity(
+                this, 3, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notif = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("DiscordRecorder 保存完了")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setOngoing(false)
+                .setAutoCancel(true)
+                .setContentIntent(openPi)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .build()
+            nm.notify(SAVED_NOTIF_ID, notif)
+        } catch (_: Exception) {}
     }
 
     private fun createNotificationChannel() {

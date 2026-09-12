@@ -1,8 +1,11 @@
-name: Build APK
+name: Build & Release APK
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,11 +17,37 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
-      - name: Build debug APK
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.6
+
+      - name: Resolve version from build.gradle.kts
+        id: ver
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
-      - uses: actions/upload-artifact@v4
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/DiscordRecorder-v${{ steps.ver.outputs.version }}.apk"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Create or update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          files: dist/DiscordRecorder-v${{ steps.ver.outputs.version }}.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

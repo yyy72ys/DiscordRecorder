@@ -35,14 +35,18 @@ def rms_db(y: np.ndarray) -> float:
     return 20 * np.log10(rms + 1e-12)
 
 def enhance_faint(y: np.ndarray, sr: int, target_db: float = -20.0, max_gain_db: float = 24.0):
-    """小声を持ち上げる簡易エフェクト: RMS正規化 + ソフトリミッター
-    データがWAV生保存なので、ここで何度でもゲイン調整可能。"""
+    """小声を持ち上げる簡易エフェクト: RMS正規化 + ピーク保護
+    データがWAV生保存なので、ここで何度でもゲイン調整可能。
+    ゲイン0のときは波形を一切加工しない（不要な歪みを避ける）。"""
     cur_db = rms_db(y)
-    gain_db = np.clip(target_db - cur_db, 0, max_gain_db)
+    gain_db = float(np.clip(target_db - cur_db, 0, max_gain_db))
+    if gain_db <= 0.05:
+        return y, 0.0
     gain = 10 ** (gain_db / 20)
     y_boost = y * gain
-    # ソフトクリップで破綻防止
-    y_boost = np.tanh(y_boost * 1.2) * 0.95
+    peak = float(np.max(np.abs(y_boost))) if y_boost.size else 0.0
+    if peak > 0.99:
+        y_boost = y_boost / peak * 0.95
     return y_boost, gain_db
 
 def simple_vad_intervals(y: np.ndarray, sr: int, frame_ms: int = 30, thresh_db: float = -50.0, min_speech_ms: int = 150, min_silence_ms: int = 200):
@@ -200,6 +204,15 @@ def process_dual(playback_path: Path, mic_path: Path, output_dir: Path, args):
     y_play_enh, gain_db = enhance_faint(y_play_16k, sr_target, target_db=-22, max_gain_db=args.max_gain_db)
     print(f"[info] playback faint enhance: +{gain_db:.1f}dB (target -22dB)")
 
+    # 出力(相手のみ)にも同じゲインを適用する。検出だけでなく実際に音量も持ち上げる。
+    if gain_db > 0.05:
+        y_play_out = y_play * (10 ** (gain_db / 20))
+        peak = float(np.max(np.abs(y_play_out))) if y_play_out.size else 0.0
+        if peak > 0.99:
+            y_play_out = y_play_out / peak * 0.95
+    else:
+        y_play_out = y_play
+
     if silero_model is not None and args.use_silero:
         import torch
         wav = torch.from_numpy(y_play_enh)
@@ -221,7 +234,7 @@ def process_dual(playback_path: Path, mic_path: Path, output_dir: Path, args):
     out_mic_wav = output_dir / "mic_only.wav"  # デバッグ用: 自分側だけ
     out_json = output_dir / "segments.json"
 
-    write_segments(y_play, sr_play, filtered, out_wav)
+    write_segments(y_play_out, sr_play, filtered, out_wav)
     write_segments(y_mic, sr_mic, mic_intervals, out_mic_wav)
 
     meta = {

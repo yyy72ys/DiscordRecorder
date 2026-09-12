@@ -85,6 +85,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 画面に戻るたびに実際の録音状態へ同期（表示ズレ防止）
+        isRecording = isServiceRunning()
+    }
+
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun MainScreen() {
@@ -135,8 +141,15 @@ class MainActivity : ComponentActivity() {
                                     startActivity(intent)
                                     Toast.makeText(this@MainActivity, "「この提供元を許可」をONにしてから再度押してください", Toast.LENGTH_LONG).show()
                                 } else {
-                                    UpdateManager.downloadAndInstall(this@MainActivity, info.apkUrl)
-                                    Toast.makeText(this@MainActivity, "ダウンロード開始", Toast.LENGTH_SHORT).show()
+                                    scope.launch {
+                                        Toast.makeText(this@MainActivity, "ダウンロード中...", Toast.LENGTH_SHORT).show()
+                                        val ok = UpdateManager.downloadAndInstall(this@MainActivity, info)
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            if (ok) "インストーラを起動しました" else "更新に失敗しました",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
                                 }
                             }, modifier = Modifier.fillMaxWidth()) {
                                 Text("ワンタップで更新")
@@ -170,11 +183,6 @@ class MainActivity : ComponentActivity() {
                         SettingsManager.setSaveMode(this@MainActivity, saveModeState)
                         Logger.i("saveMode set to INTERNAL")
                     }, label = { Text("内部") })
-                    FilterChip(selected = saveModeState == SettingsManager.SaveMode.MUSIC, onClick = {
-                        saveModeState = SettingsManager.SaveMode.MUSIC
-                        SettingsManager.setSaveMode(this@MainActivity, saveModeState)
-                        Logger.i("saveMode set to MUSIC")
-                    }, label = { Text("Music") })
                     FilterChip(selected = saveModeState == SettingsManager.SaveMode.CUSTOM, onClick = {
                         folderPickerLauncher.launch(null)
                     }, label = { Text("選択") })
@@ -230,10 +238,15 @@ class MainActivity : ComponentActivity() {
                         Button(onClick = {
                             scope.launch {
                                 try {
-                                    val info = UpdateManager.checkForUpdate(this@MainActivity)
+                                    val info = autoUpdateInfo ?: UpdateManager.checkForUpdate(this@MainActivity)
                                     if (info != null) {
-                                        UpdateManager.downloadAndInstall(this@MainActivity, info.apkUrl)
-                                        Toast.makeText(this@MainActivity, "ダウンロード開始: ${info.tag}", Toast.LENGTH_SHORT).show()
+                                        autoUpdateInfo = null
+                                        val ok = UpdateManager.downloadAndInstall(this@MainActivity, info)
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            if (ok) "インストーラを起動しました: ${info.tag}" else "ダウンロード失敗",
+                                            Toast.LENGTH_LONG
+                                        ).show()
                                     } else {
                                         Toast.makeText(this@MainActivity, "情報取得失敗", Toast.LENGTH_SHORT).show()
                                     }
@@ -426,15 +439,6 @@ class MainActivity : ComponentActivity() {
 
     private fun openRecordingsFolder() {
         Toast.makeText(this, "保存先: ${SettingsManager.getDisplayPath(this)}", Toast.LENGTH_LONG).show()
-        // 内部ストレージの場合はファイルアプリで開くヒント
-        if (SettingsManager.getSaveMode(this) == SettingsManager.SaveMode.MUSIC) {
-            try {
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "*/*")
-                }
-                // 単にトーストで案内するだけ
-            } catch (_: Exception){}
-        }
     }
 
     private fun isServiceRunning(): Boolean {
