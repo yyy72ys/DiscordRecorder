@@ -59,16 +59,38 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
         if (uri != null) {
+            var granted = true
             try {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             } catch (e: Exception) {
+                granted = false
                 Logger.w("takePersistableUriPermission failed: ${e.message}")
             }
             SettingsManager.setCustomUri(this, uri)
+            val name = try { DocumentFile.fromTreeUri(this, uri)?.name } catch (_: Exception) { null }
+            SettingsManager.setCustomName(this, name)
             SettingsManager.setSaveMode(this, SettingsManager.SaveMode.CUSTOM)
             saveModeState = SettingsManager.SaveMode.CUSTOM
-            Logger.i("Custom folder selected: $uri")
-            Toast.makeText(this, "保存先を設定しました", Toast.LENGTH_SHORT).show()
+            Logger.i("Custom folder selected: $uri name=$name granted=$granted")
+            // 書き込みテスト（選んだ場所に本当に書けるか）
+            val writable = try {
+                val df = DocumentFile.fromTreeUri(this, uri)
+                val test = df?.createFile("text/plain", "write_test.txt")
+                if (test != null) {
+                    contentResolver.openOutputStream(test.uri)?.use { it.write("ok".toByteArray()) }
+                    test.delete()
+                    true
+                } else false
+            } catch (e: Exception) {
+                Logger.e("write test failed", e)
+                false
+            }
+            val msg = when {
+                writable -> "保存先を設定しました: ${name ?: uri}"
+                granted -> "保存先を設定しました（書き込み確認に失敗。別フォルダを試してください）"
+                else -> "保存先を設定しました（アクセス権の保持に失敗。もう一度選び直してください）"
+            }
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
         } else {
             Toast.makeText(this, "キャンセルされました", Toast.LENGTH_SHORT).show()
         }
@@ -188,11 +210,23 @@ class MainActivity : ComponentActivity() {
                     }, label = { Text("選択") })
                 }
                 OutlinedButton(onClick = { folderPickerLauncher.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("フォルダを選択（SAF）")
+                    Text("フォルダを選択")
+                }
+                OutlinedButton(onClick = {
+                    val sd = findSdCardRootUri()
+                    if (sd == null) {
+                        Toast.makeText(this@MainActivity, "SDカードが見つかりません（未挿入/未マウント）", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "SDカード内で保存先フォルダを選んで「このフォルダを使用」", Toast.LENGTH_LONG).show()
+                        folderPickerLauncher.launch(sd)
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("SDカードを選ぶ")
                 }
                 OutlinedButton(onClick = { openRecordingsFolder() }, modifier = Modifier.fillMaxWidth()) {
                     Text("保存フォルダを確認")
                 }
+                Text("SDカードは一番上の階層は選べません。中に「DiscordRecorder」等のフォルダを作って選んでください。", style = MaterialTheme.typography.bodySmall)
 
                 Divider()
 
@@ -312,54 +346,35 @@ class MainActivity : ComponentActivity() {
                         Text(diagnosticText, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(8.dp))
                     }
                     OutlinedButton(onClick = {
-                        // 自動でGitHubに送る（テスターの動き）
                         val token = SettingsManager.getGithubToken(this@MainActivity)
                         if (token.isNullOrBlank()) {
-                            Toast.makeText(this@MainActivity, "先にGitHub Tokenを設定してください", Toast.LENGTH_LONG).show()
-                            return@OutlinedButton
-                        }
-                        scope.launch {
-                            try {
-                                Toast.makeText(this@MainActivity, "GitHubに送信中...", Toast.LENGTH_SHORT).show()
-                                val logs = Logger.readAll(this@MainActivity)
-                                val url = DiagnosticsReporter.sendAsIssue(this@MainActivity, diagnosticText, logs)
-                                if (url != null) {
-                                    Toast.makeText(this@MainActivity, "送信成功", Toast.LENGTH_LONG).show()
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                                    startActivity(intent)
-                                } else {
-                                    Toast.makeText(this@MainActivity, "送信失敗: ログを確認", Toast.LENGTH_LONG).show()
+                            // トークン無しでも送れる: 端末の共有（メール/LINE/Drive等）
+                            Toast.makeText(this@MainActivity, "共有先を選んで送ってください（トークン不要）", Toast.LENGTH_LONG).show()
+                            shareDiagnostics(diagnosticText)
+                        } else {
+                            scope.launch {
+                                try {
+                                    Toast.makeText(this@MainActivity, "GitHubに送信中...", Toast.LENGTH_SHORT).show()
+                                    val logs = Logger.readAll(this@MainActivity)
+                                    val url = DiagnosticsReporter.sendAsIssue(this@MainActivity, diagnosticText, logs)
+                                    if (url != null) {
+                                        Toast.makeText(this@MainActivity, "送信成功", Toast.LENGTH_LONG).show()
+                                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                    } else {
+                                        Toast.makeText(this@MainActivity, "送信失敗: 共有に切り替えます", Toast.LENGTH_LONG).show()
+                                        shareDiagnostics(diagnosticText)
+                                    }
+                                } catch (e: Exception) {
+                                    Logger.e("auto send failed", e)
+                                    shareDiagnostics(diagnosticText)
                                 }
-                            } catch (e: Exception) {
-                                Logger.e("auto send failed", e)
-                                Toast.makeText(this@MainActivity, "送信失敗: ${e.message}", Toast.LENGTH_LONG).show()
                             }
                         }
-                    }, modifier = Modifier.fillMaxWidth()) { Text("GitHubに自動送信（テスター用）") }
-                    OutlinedButton(onClick = {
-                        try {
-                            // 大きなテキストはファイル経由で共有（TransactionTooLarge対策）
-                            val shareFile = java.io.File(cacheDir, "diagnostics.txt").apply { writeText(diagnosticText) }
-                            val uri = androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", shareFile)
-                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_STREAM, uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            startActivity(Intent.createChooser(intent, "診断結果を共有"))
-                        } catch (e: Exception) {
-                            Logger.e("share diagnostics failed", e)
-                            Toast.makeText(this@MainActivity, "共有失敗: ${e.message}", Toast.LENGTH_SHORT).show()
-                            // フォールバック: 小さくして再試行
-                            try {
-                                val intent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_TEXT, diagnosticText.take(8000))
-                                }
-                                startActivity(Intent.createChooser(intent, "診断結果を共有"))
-                            } catch (_: Exception) {}
-                        }
-                    }, modifier = Modifier.fillMaxWidth()) { Text("診断結果を共有") }
+                    }, modifier = Modifier.fillMaxWidth()) { Text("診断結果を送る") }
+                    OutlinedButton(onClick = { shareDiagnostics(diagnosticText) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("診断結果を共有（ファイル）")
+                    }
+                    Text("GitHubへ自動投稿する場合のみトークンが必要です。トークン無しでも共有アプリで送れます。", style = MaterialTheme.typography.bodySmall)
                 }
                 if (showLogs && logText.isNotBlank()) {
                     Text("ログ:", style = MaterialTheme.typography.titleSmall)
@@ -439,6 +454,50 @@ class MainActivity : ComponentActivity() {
 
     private fun openRecordingsFolder() {
         Toast.makeText(this, "保存先: ${SettingsManager.getDisplayPath(this)}", Toast.LENGTH_LONG).show()
+    }
+
+    /**
+     * リムーバブルSDカードのルートURI（SAFピッカーの初期位置に使う）。
+     * getExternalFilesDirs の2番目以降がSDカード。パスからボリュームUUIDを取り出す。
+     */
+    @Suppress("DEPRECATION")
+    private fun findSdCardRootUri(): Uri? {
+        return try {
+            val dirs = getExternalFilesDirs(null)
+            if (dirs.size < 2 || dirs[1] == null) return null
+            val path = dirs[1]!!.absolutePath // 例: /storage/1234-ABCD/Android/data/<pkg>/...
+            val m = Regex("/storage/([^/]+)/").find(path) ?: return null
+            val uuid = m.groupValues[1]
+            if (uuid.isBlank() || uuid == "emulated") return null
+            Uri.parse("content://com.android.externalstorage.documents/root/$uuid")
+        } catch (e: Exception) {
+            Logger.w("findSdCardRootUri failed: ${e.message}")
+            null
+        }
+    }
+
+    /** 診断結果を端末の共有シートで送る（GitHubトークン不要）。大きい本文はファイル経由。 */
+    private fun shareDiagnostics(text: String) {
+        try {
+            val shareFile = java.io.File(cacheDir, "diagnostics.txt").apply { writeText(text) }
+            val uri = androidx.core.content.FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "診断結果を送る"))
+        } catch (e: Exception) {
+            Logger.e("share diagnostics failed", e)
+            try {
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, text.take(8000))
+                }
+                startActivity(Intent.createChooser(intent, "診断結果を送る"))
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun isServiceRunning(): Boolean {

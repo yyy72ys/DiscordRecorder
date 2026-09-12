@@ -11,6 +11,7 @@ object SettingsManager {
     private const val PREF_NAME = "recorder_settings"
     private const val KEY_SAVE_MODE = "save_mode" // internal | custom
     private const val KEY_CUSTOM_URI = "custom_uri"
+    private const val KEY_CUSTOM_NAME = "custom_name"
     private const val KEY_GITHUB_TOKEN = "github_token"
     private const val KEY_AUTO_SEND = "auto_send"
 
@@ -61,6 +62,13 @@ object SettingsManager {
         }
     }
 
+    fun setCustomName(context: Context, name: String?) {
+        prefs(context).edit().putString(KEY_CUSTOM_NAME, name).apply()
+    }
+
+    fun getCustomName(context: Context): String? =
+        prefs(context).getString(KEY_CUSTOM_NAME, null)?.takeIf { it.isNotBlank() }
+
     fun isCustomUriValid(context: Context): Boolean {
         val uri = getCustomUri(context) ?: return false
         val perms = context.contentResolver.persistedUriPermissions
@@ -106,8 +114,9 @@ object SettingsManager {
             SaveMode.INTERNAL -> "内部: Android/data/com.example.discordrecorder/files/Music/DiscordRecorder/"
             SaveMode.CUSTOM -> {
                 val uri = getCustomUri(context)
+                val name = getCustomName(context) ?: uri?.lastPathSegment
                 if (uri != null && isCustomUriValid(context)) {
-                    "選択フォルダ: $uri"
+                    "選択フォルダ: ${name ?: uri}"
                 } else {
                     "選択フォルダ未設定 → 内部に保存"
                 }
